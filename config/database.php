@@ -13,7 +13,7 @@ return [
             'charset' => 'utf8',
             'prefix' => '',
             'prefix_indexes' => true,
-            'search_path' => 'library',
+            'search_path' => 'public,library',
             'sslmode' => 'prefer',
         ],
     ],
