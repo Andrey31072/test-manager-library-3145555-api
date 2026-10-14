@@ -10,7 +10,7 @@ return [
     'fallback_locale' => env('APP_FALLBACK_LOCALE', 'en'),
     'key' => env('APP_KEY'),
     'cipher' => 'AES-256-CBC',
-    'providers' => [
+    'providers' => Illuminate\Support\ServiceProvider::defaultProviders()->merge([
         App\Providers\AppServiceProvider::class,
-    ],
+    ])->toArray(),
 ];

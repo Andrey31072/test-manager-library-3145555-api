@@ -6,6 +6,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Facades\Storage;
 use Ramsey\Uuid\Uuid;
 
 function uuid(): string { return Uuid::uuid4()->toString(); }
@@ -120,6 +121,28 @@ Route::prefix('v1')->group(function () {
             ? response('', 204) : ApiResponse::error('NOT_FOUND', 'Recurso no encontrado.', 404);
     });
 
+    Route::middleware('api.auth')->get('/books/{id}/cover', function (string $id) {
+        $key = DB::table('library.book')->where('id', $id)->whereNull('deleted_at')->value('cover_key');
+        if (! $key || ! Storage::disk('local')->exists($key)) return ApiResponse::error('NOT_FOUND', 'Recurso no encontrado.', 404);
+        return response()->file(Storage::disk('local')->path($key));
+    });
+
+    Route::middleware('api.auth:admin')->put('/books/{id}/cover', function (Request $request, string $id) {
+        $request->validate(['cover' => ['required', 'file', 'mimes:jpg,jpeg,png', 'max:2048']]);
+        if (! DB::table('library.book')->where('id', $id)->whereNull('deleted_at')->exists()) return ApiResponse::error('NOT_FOUND', 'Recurso no encontrado.', 404);
+        $key = $request->file('cover')->store('covers');
+        DB::table('library.book')->where('id', $id)->update(['cover_key' => $key]);
+        return ['cover_key' => $key];
+    });
+
+    Route::middleware('api.auth:admin')->delete('/books/{id}/cover', function (string $id) {
+        $book = DB::table('library.book')->where('id', $id)->whereNull('deleted_at')->first();
+        if (! $book) return ApiResponse::error('NOT_FOUND', 'Recurso no encontrado.', 404);
+        if ($book->cover_key) Storage::disk('local')->delete($book->cover_key);
+        DB::table('library.book')->where('id', $id)->update(['cover_key' => null]);
+        return response('', 204);
+    });
+
     Route::middleware('api.auth:admin,librarian')->post('/members', function (Request $request) {
         if (DB::table('library.member')->where('document_number', $request->input('document_number'))->exists()) {
             return ApiResponse::error('DOCUMENT_TAKEN', 'El documento ya existe.', 409);
@@ -180,6 +203,24 @@ Route::prefix('v1')->group(function () {
         $rows = DB::table('library.loan as l')->join('library.loan_item as li', 'li.loan_id', '=', 'l.id')->join('library.member as m', 'm.id', '=', 'l.member_id')
             ->whereNull('li.returned_at')->where('li.due_at', '<', now()->toISOString())->select('l.id as loan_id', 'li.id as item_id', 'li.book_title', 'm.full_name as member_name', 'li.due_at')->get();
         return ['items' => $rows->map(function ($row) { $row->days_late = (new DateTimeImmutable($row->due_at))->diff(new DateTimeImmutable('now', new DateTimeZone('UTC')))->days; return $row; })->sortByDesc('days_late')->values()];
+    });
+
+    Route::middleware('api.auth:admin,librarian')->get('/loans', function (Request $request) {
+        $query = DB::table('library.loan')->orderByDesc('loaned_at');
+        if ($request->filled('member_id')) $query->where('member_id', $request->query('member_id'));
+        if ($request->filled('from')) $query->where('loaned_at', '>=', $request->query('from'));
+        if ($request->filled('to')) $query->where('loaned_at', '<=', $request->query('to'));
+        return paged($query, $request);
+    });
+
+    Route::middleware('api.auth:admin,librarian')->get('/loans/{id}', function (string $id) {
+        $loan = DB::table('library.loan')->where('id', $id)->first();
+        if (! $loan) return ApiResponse::error('NOT_FOUND', 'Recurso no encontrado.', 404);
+        $items = DB::table('library.loan_item')->where('loan_id', $id)->get();
+        $open = $items->whereNull('returned_at');
+        $loan->status = $open->isEmpty() ? 'closed' : ($open->contains(fn ($item) => new DateTimeImmutable($item->due_at) < new DateTimeImmutable('now', new DateTimeZone('UTC'))) ? 'overdue' : 'open');
+        $loan->items = $items;
+        return (array) $loan;
     });
 
     Route::middleware('api.auth:admin,librarian')->post('/loans/{loan_id}/items/{item_id}/return', function (string $loanId, string $itemId) {
