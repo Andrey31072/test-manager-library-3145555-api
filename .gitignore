@@ -1,8 +1,0 @@
-/vendor
-/.env
-/storage/*.key
-/storage/app/covers
-/storage/framework/cache/*
-/storage/framework/sessions/*
-/storage/framework/views/*
-/bootstrap/cache/*.php
