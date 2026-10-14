@@ -10,6 +10,8 @@ use Ramsey\Uuid\Uuid;
 
 function uuid(): string { return Uuid::uuid4()->toString(); }
 
+class BookStockConflict extends RuntimeException {}
+
 function paged($query, Request $request): array
 {
     $page = max(1, (int) $request->query('page', 1));
@@ -153,20 +155,25 @@ Route::prefix('v1')->group(function () {
         $openItems = DB::table('library.loan as l')->join('library.loan_item as li', 'li.loan_id', '=', 'l.id')->where('l.member_id', $memberId)->whereNull('li.returned_at')->get();
         if ($openItems->contains(fn ($item) => new DateTimeImmutable($item->due_at) < $now)) return ApiResponse::error('MEMBER_HAS_OVERDUE', 'El socio tiene libros vencidos.', 409);
         if ($openItems->count() + $items->count() > 3) return ApiResponse::error('MEMBER_LIMIT_EXCEEDED', 'El socio supera el limite de libros sin devolver.', 422);
-        return DB::transaction(function () use ($request, $items, $memberId, $now) {
-            $books = DB::table('library.book as b')->join('library.category as c', 'c.id', '=', 'b.category_id')->whereIn('b.id', $items)->whereNull('b.deleted_at')->select('b.*', 'c.name as category_name')->lockForUpdate()->get()->keyBy('id');
+        try {
+            return DB::transaction(function () use ($request, $items, $memberId, $now) {
+            $books = DB::table('library.book as b')->join('library.category as c', 'c.id', '=', 'b.category_id')->whereIn('b.id', $items)->whereNull('b.deleted_at')->select('b.*', 'c.name as category_name')->get()->keyBy('id');
             if ($books->count() !== $items->count() || $books->contains(fn ($book) => $book->available_copies < 1)) return ApiResponse::error('BOOK_NOT_AVAILABLE', 'No quedan ejemplares disponibles.', 409);
             $loanId = uuid();
             DB::table('library.loan')->insert(['id' => $loanId, 'member_id' => $memberId, 'loaned_by_user_id' => $request->attributes->get('auth_user')->id, 'loaned_at' => $now->format('Y-m-d\TH:i:s\Z')]);
             $loanItems = [];
             foreach ($items as $bookId) {
                 $book = $books[$bookId];
-                DB::table('library.book')->where('id', $bookId)->update(['available_copies' => $book->available_copies - 1]);
+                $updated = DB::table('library.book')->where('id', $bookId)->where('available_copies', '>', 0)->decrement('available_copies');
+                if ($updated !== 1) throw new BookStockConflict();
                 $loanItems[] = ['id' => uuid(), 'loan_id' => $loanId, 'book_id' => $bookId, 'book_title' => $book->title, 'isbn' => $book->isbn, 'category_name' => $book->category_name, 'due_at' => $now->modify('+14 days')->format('Y-m-d\TH:i:s\Z'), 'returned_at' => null];
             }
             DB::table('library.loan_item')->insert($loanItems);
             return response()->json(['id' => $loanId, 'member_id' => $memberId, 'loaned_at' => $now->format('Y-m-d\TH:i:s\Z'), 'status' => 'open', 'items' => $loanItems], 201);
-        });
+            });
+        } catch (BookStockConflict) {
+            return ApiResponse::error('BOOK_NOT_AVAILABLE', 'No quedan ejemplares disponibles.', 409);
+        }
     });
 
     Route::middleware('api.auth:admin,librarian')->get('/loans/overdue', function () {
